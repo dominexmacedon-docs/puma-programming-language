@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   publish:
-    name: Install, test and publish Puma
     runs-on: ubuntu-latest
 
     steps:
@@ -23,26 +22,20 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      - name: Show Node.js version
-        run: node --version
-
-      - name: Show npm version
-        run: npm --version
-
       - name: Install dependencies
         run: npm install
 
-      - name: Verify installed modules
+      - name: Verify node_modules
         run: |
           test -d node_modules
           test -d node_modules/readline-sync
           test -d node_modules/ws
 
       - name: Test Puma
-        run: npm test
+        run: node puma.js test.pulsar
 
-      - name: Check package contents
+      - name: Check package
         run: npm pack --dry-run
 
-      - name: Publish Puma to npm
-        run: npm publish
+      - name: Publish Puma
+        run: npm publish --access public
