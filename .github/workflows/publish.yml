@@ -118,18 +118,11 @@ jobs:
           Name: "{group}\Uninstall Puma"; Filename: "{uninstallexe}"
 
           [Registry]
-          Root: HKLM
-          Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
-          ValueType: expandsz
-          ValueName: "Path"
-          ValueData: "{olddata};{app}"
-          Flags: preservestringtype
+          Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Flags: preservestringtype
 
-          [Run]
-          Filename: "{app}\puma.cmd"
-          Parameters: "-v"
-          WorkingDir: "{app}"
-          Flags: postinstall skipifsilent
+          [UninstallDelete]
+          Type: filesandordirs; Name: "{app}"
+
           "@ | Set-Content -Path PumaInstaller.iss -Encoding UTF8
 
       - name: Build Puma installer
@@ -147,6 +140,10 @@ jobs:
 
           & $iscc "PumaInstaller.iss"
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup compilation failed."
+          }
+
       - name: Verify installer
         shell: pwsh
         run: |
@@ -156,7 +153,7 @@ jobs:
             throw "Puma installer was not created."
           }
 
-          Write-Host "Created:"
+          Write-Host "Puma installer successfully created:"
           Get-Item $installer | Format-List FullName,Length
 
       - name: Create GitHub Release
