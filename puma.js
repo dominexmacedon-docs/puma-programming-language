@@ -22,6 +22,10 @@ const COLOR = {
 };
 
 function waitAndExit(code = 0) {
+    if (!process.stdin.isTTY) {
+        process.exit(code);
+    }
+
     console.log(COLOR.gray + '\nPress any key to exit...' + COLOR.reset);
 
     try {
@@ -29,6 +33,7 @@ function waitAndExit(code = 0) {
     } catch {}
 
     process.stdin.resume();
+
     process.stdin.once('data', () => {
         process.exit(code);
     });
