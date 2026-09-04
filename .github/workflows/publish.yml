@@ -1,0 +1,48 @@
+name: Publish Puma to npm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Install, test and publish Puma
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Show Node.js version
+        run: node --version
+
+      - name: Show npm version
+        run: npm --version
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify installed modules
+        run: |
+          test -d node_modules
+          test -d node_modules/readline-sync
+          test -d node_modules/ws
+
+      - name: Test Puma
+        run: npm test
+
+      - name: Check package contents
+        run: npm pack --dry-run
+
+      - name: Publish Puma to npm
+        run: npm publish
