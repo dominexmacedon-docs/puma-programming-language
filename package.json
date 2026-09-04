@@ -11,11 +11,12 @@
     "lexer.js",
     "parser.js",
     "evaluator.js",
-    "README.md"
+    "README.md",
+    "package.json"
   ],
   "scripts": {
     "start": "node puma.js",
-    "test": "node puma.js --version"
+    "version": "node puma.js -v"
   },
   "dependencies": {
     "readline-sync": "^1.4.10",
@@ -40,8 +41,5 @@
     "interpreter",
     "pulsar",
     "language"
-  ],
-  "publishConfig": {
-    "access": "public"
-  }
+  ]
 }
