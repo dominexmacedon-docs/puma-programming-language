@@ -84,7 +84,7 @@ Usage:
 }
 
 if (args[0] === '--version' || args[0] === '-v') {
-    console.log(COLOR.cyan + `Lopo CLI v${VERSION}` + COLOR.reset);
+    console.log(COLOR.cyan + `Puma CLI v${VERSION}` + COLOR.reset);
     waitAndExit(0);
     return; 
 }
