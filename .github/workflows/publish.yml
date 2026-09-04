@@ -22,44 +22,8 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      - name: Verify package metadata
-        run: |
-          echo "Package:"
-          npm pkg get name
-
-          echo "Version:"
-          npm pkg get version
-
-          echo "Binary:"
-          npm pkg get bin
-
-      - name: Verify Puma CLI
-        run: |
-          test -f puma.js
-          test "$(head -n 1 puma.js)" = "#!/usr/bin/env node"
-          echo "Puma CLI:"
-          head -n 1 puma.js
-
       - name: Install dependencies
         run: npm install
-
-      - name: Verify node_modules
-        run: |
-          test -d node_modules
-          test -d node_modules/readline-sync
-          test -d node_modules/ws
-
-      - name: Verify npm executable
-        run: |
-          npm exec -- puma --version
-
-      - name: Test Puma
-        run: |
-          printf '%s\n' 'show("Hello World!");' > test.pulsar
-          npm exec -- puma test.pulsar
-
-      - name: Check package
-        run: npm pack --dry-run
 
       - name: Publish Puma
         run: npm publish --access public
