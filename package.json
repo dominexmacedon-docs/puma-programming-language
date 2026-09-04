@@ -1,0 +1,47 @@
+{
+  "name": "puma-programming-language",
+  "version": "1.0.2",
+  "description": "Puma Programming Language interpreter for .pulsar files.",
+  "main": "puma.js",
+  "bin": {
+    "puma": "./puma.js"
+  },
+  "files": [
+    "puma.js",
+    "lexer.js",
+    "parser.js",
+    "evaluator.js",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node puma.js",
+    "test": "node puma.js --version"
+  },
+  "dependencies": {
+    "readline-sync": "^1.4.10",
+    "ws": "^8.18.3"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dominexmacedon-docs/puma-programming-language.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dominexmacedon-docs/puma-programming-language/issues"
+  },
+  "homepage": "https://github.com/dominexmacedon-docs/puma-programming-language",
+  "license": "MIT",
+  "keywords": [
+    "puma",
+    "puma-language",
+    "programming-language",
+    "interpreter",
+    "pulsar",
+    "language"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
