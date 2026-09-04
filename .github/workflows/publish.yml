@@ -20,6 +20,16 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Verify Puma logo
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "assets\PUL.ico")) {
+            throw "Puma logo was not found at assets\PUL.ico"
+          }
+
+          Write-Host "Puma logo found:"
+          Get-Item "assets\PUL.ico" | Format-List FullName,Length
+
       - name: Install Puma dependencies
         run: npm install --omit=dev
 
@@ -28,7 +38,14 @@ jobs:
         shell: pwsh
         run: |
           $version = node -p "require('./package.json').version"
+
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Could not determine Puma version."
+          }
+
           "version=$version" >> $env:GITHUB_OUTPUT
+
+          Write-Host "Puma version: $version"
 
       - name: Download portable Node.js
         shell: pwsh
@@ -36,9 +53,16 @@ jobs:
           $nodeVersion = "v24.19.0"
           $url = "https://nodejs.org/dist/$nodeVersion/node-$nodeVersion-win-x64.zip"
 
+          Write-Host "Downloading portable Node.js:"
+          Write-Host $url
+
           Invoke-WebRequest `
             -Uri $url `
             -OutFile node.zip
+
+          if (-not (Test-Path "node.zip")) {
+            throw "Node.js archive was not downloaded."
+          }
 
           Expand-Archive `
             -Path node.zip `
@@ -48,26 +72,60 @@ jobs:
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path release/Puma
+            -Path "release\Puma" | Out-Null
+
+          $portableNode = "node-runtime\node-$nodeVersion-win-x64\node.exe"
+
+          if (-not (Test-Path $portableNode)) {
+            throw "Portable node.exe was not found."
+          }
 
           Copy-Item `
-            "node-runtime/node-$nodeVersion-win-x64/node.exe" `
-            "release/Puma/node.exe"
+            $portableNode `
+            "release\Puma\node.exe" `
+            -Force
+
+          Write-Host "Portable Node.js copied successfully."
 
       - name: Prepare Puma files
         shell: pwsh
         run: |
-          Copy-Item puma.js release/Puma/
-          Copy-Item lexer.js release/Puma/
-          Copy-Item parser.js release/Puma/
-          Copy-Item evaluator.js release/Puma/
-          Copy-Item package.json release/Puma/
-          Copy-Item README.md release/Puma/
+          $files = @(
+            "puma.js",
+            "lexer.js",
+            "parser.js",
+            "evaluator.js",
+            "package.json",
+            "README.md"
+          )
+
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Required Puma file is missing: $file"
+            }
+
+            Copy-Item `
+              $file `
+              "release\Puma\$file" `
+              -Force
+          }
+
+          if (-not (Test-Path "node_modules")) {
+            throw "node_modules directory was not created."
+          }
 
           Copy-Item `
-            node_modules `
-            release/Puma/node_modules `
-            -Recurse
+            "node_modules" `
+            "release\Puma\node_modules" `
+            -Recurse `
+            -Force
+
+          Copy-Item `
+            "assets\PUL.ico" `
+            "release\Puma\PUL.ico" `
+            -Force
+
+          Write-Host "Puma files prepared."
 
       - name: Create Puma launcher
         shell: pwsh
@@ -76,8 +134,30 @@ jobs:
           @echo off
           "%~dp0node.exe" "%~dp0puma.js" %*
           '@ | Set-Content `
-            -Path release/Puma/puma.cmd `
+            -Path "release\Puma\puma.cmd" `
             -Encoding ASCII
+
+          if (-not (Test-Path "release\Puma\puma.cmd")) {
+            throw "puma.cmd was not created."
+          }
+
+          Write-Host "Puma launcher created."
+
+      - name: Test bundled Puma
+        shell: pwsh
+        run: |
+          Push-Location "release\Puma"
+
+          try {
+            & ".\node.exe" ".\puma.js" -v
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Bundled Puma version test failed."
+            }
+          }
+          finally {
+            Pop-Location
+          }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -94,8 +174,11 @@ jobs:
           AppId={{B8B6B6D0-6E9D-4D90-9B72-PUMA00000001}
           AppName=Puma
           AppVersion={#PumaVersion}
+          AppVerName=Puma {#PumaVersion}
           AppPublisher=Dominex Macedon
           AppPublisherURL=https://github.com/dominexmacedon-docs/puma-programming-language
+          AppSupportURL=https://github.com/dominexmacedon-docs/puma-programming-language
+          AppUpdatesURL=https://github.com/dominexmacedon-docs/puma-programming-language
           DefaultDirName={autopf}\Puma
           DefaultGroupName=Puma
           DisableProgramGroupPage=yes
@@ -104,26 +187,86 @@ jobs:
           ArchitecturesInstallIn64BitMode=x64compatible
           OutputDir=installer
           OutputBaseFilename=PumaSetup-v{#PumaVersion}
+          SetupIconFile=assets\PUL.ico
+          UninstallDisplayIcon={app}\PUL.ico
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
           Uninstallable=yes
           ChangesEnvironment=yes
+          ChangesAssociations=yes
 
           [Files]
           Source: "release\Puma\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
           [Icons]
-          Name: "{group}\Puma"; Filename: "{app}\puma.cmd"
-          Name: "{group}\Uninstall Puma"; Filename: "{uninstallexe}"
+          Name: "{group}\Puma"; Filename: "{app}\puma.cmd"; IconFilename: "{app}\PUL.ico"
+          Name: "{group}\Uninstall Puma"; Filename: "{uninstallexe}"; IconFilename: "{app}\PUL.ico"
 
           [Registry]
+
+          ; ==========================================
+          ; .pulsar file extension
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\.pulsar"; ValueType: string; ValueName: ""; ValueData: "Puma.PulsarFile"; Flags: uninsdeletevalue
+
+          ; ==========================================
+          ; Puma Pulsar file type
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile"; ValueType: string; ValueName: ""; ValueData: "Puma Program File"; Flags: uninsdeletekey
+
+          ; ==========================================
+          ; Puma icon for .pulsar files
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\PUL.ico"; Flags: uninsdeletekey
+
+          ; ==========================================
+          ; Default double-click action
+          ; Double-clicking .pulsar runs Puma
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\open"; ValueType: string; ValueName: ""; ValueData: "Open with Puma"; Flags: uninsdeletekey
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\puma.cmd"" ""%1"""; Flags: uninsdeletekey
+
+          ; ==========================================
+          ; Right-click: Open with Puma
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\puma"; ValueType: string; ValueName: ""; ValueData: "Open with Puma"; Flags: uninsdeletekey
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\puma\command"; ValueType: string; ValueName: ""; ValueData: """{app}\puma.cmd"" ""%1"""; Flags: uninsdeletekey
+
+          ; ==========================================
+          ; Right-click: Open with Notepad
+          ; ==========================================
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\edit"; ValueType: string; ValueName: ""; ValueData: "Open with Notepad"; Flags: uninsdeletekey
+
+          Root: HKLM; Subkey: "Software\Classes\Puma.PulsarFile\shell\edit\command"; ValueType: string; ValueName: ""; ValueData: """{sys}\notepad.exe"" ""%1"""; Flags: uninsdeletekey
+
+          ; ==========================================
+          ; Add Puma to Windows PATH
+          ; ==========================================
+
           Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Flags: preservestringtype
 
           [UninstallDelete]
           Type: filesandordirs; Name: "{app}"
 
-          "@ | Set-Content -Path PumaInstaller.iss -Encoding UTF8
+          "@ | Set-Content `
+            -Path "PumaInstaller.iss" `
+            -Encoding UTF8
+
+          Write-Host "Inno Setup script created."
+
+      - name: Show installer script
+        shell: pwsh
+        run: |
+          Get-Content "PumaInstaller.iss"
 
       - name: Build Puma installer
         shell: pwsh
@@ -137,6 +280,9 @@ jobs:
           if (-not (Test-Path $iscc)) {
             throw "Inno Setup compiler was not found."
           }
+
+          Write-Host "Using Inno Setup compiler:"
+          Write-Host $iscc
 
           & $iscc "PumaInstaller.iss"
 
@@ -153,8 +299,15 @@ jobs:
             throw "Puma installer was not created."
           }
 
-          Write-Host "Puma installer successfully created:"
-          Get-Item $installer | Format-List FullName,Length
+          $file = Get-Item $installer
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Puma installer successfully created"
+          Write-Host "=========================================="
+          Write-Host "Path: $($file.FullName)"
+          Write-Host "Size: $($file.Length) bytes"
+          Write-Host ""
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
