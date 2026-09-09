@@ -471,26 +471,107 @@ this.global.define('defineModel', (modelName, schema = {}) => {
   };
 });
 this.global.define('createServer', (options = {}) => {
-  const routes = { GET: [], POST: [], PUT: [], DELETE: [], PATCH: [], OPTIONS: [] };
-  const globalMiddlewares = [];
-  const sessionMemoryStore = {};
-  
-  const MIME_TYPES = {
-    '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm',
-    '.ogv': 'video/ogg', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
-    '.mkv': 'video/x-matroska', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
-    '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.flac': 'audio/flac',
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif', '.svg': 'image/svg+xml', '.webp': 'image/webp',
-    '.ico': 'image/x-icon', '.html': 'text/html', '.htm': 'text/html',
-    '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
-    '.json': 'application/json', '.xml': 'application/xml', '.pdf': 'application/pdf',
-    '.zip': 'application/zip', '.txt': 'text/plain'
+  const routes = {
+    GET: [],
+    POST: [],
+    PUT: [],
+    DELETE: [],
+    PATCH: [],
+    OPTIONS: []
   };
 
-  // Helper function for HTML escaping to protect against XSS by default
-  const escapeHtml = (str) => {
-    return String(str)
+  const globalMiddlewares = [];
+
+  /*
+   * --------------------------------------------------------------------------
+   * SERVER CONFIGURATION
+   * --------------------------------------------------------------------------
+   */
+
+  const sessionOptions = {
+    cookieName: options.sessionCookieName || 'PUMA_SESSID',
+    maxAge: Number.isFinite(options.sessionMaxAge)
+      ? options.sessionMaxAge
+      : 7 * 24 * 60 * 60,
+
+    httpOnly: options.sessionHttpOnly !== false,
+
+    secure:
+      options.sessionSecure !== undefined
+        ? Boolean(options.sessionSecure)
+        : Boolean(options.key && options.cert),
+
+    sameSite: options.sessionSameSite || 'Lax',
+
+    path: options.sessionPath || '/',
+
+    rolling:
+      options.sessionRolling !== false,
+
+    cacheControl:
+      options.sessionCacheControl !== false
+  };
+
+  const sessionMemoryStore = new Map();
+
+  /*
+   * --------------------------------------------------------------------------
+   * MIME TYPES
+   * --------------------------------------------------------------------------
+   */
+
+  const MIME_TYPES = {
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.webm': 'video/webm',
+    '.ogv': 'video/ogg',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mkv': 'video/x-matroska',
+
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.flac': 'audio/flac',
+
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.webp': 'image/webp',
+    '.ico': 'image/x-icon',
+
+    '.html': 'text/html',
+    '.htm': 'text/html',
+
+    '.js': 'text/javascript',
+    '.mjs': 'text/javascript',
+
+    '.css': 'text/css',
+
+    '.json': 'application/json',
+    '.xml': 'application/xml',
+
+    '.pdf': 'application/pdf',
+    '.zip': 'application/zip',
+    '.txt': 'text/plain',
+
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.otf': 'font/otf'
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * HTML ESCAPING
+   * --------------------------------------------------------------------------
+   */
+
+  const escapeHtml = (value) => {
+    return String(value === undefined || value === null ? '' : value)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -498,486 +579,2916 @@ this.global.define('createServer', (options = {}) => {
       .replace(/'/g, '&#039;');
   };
 
-  // Helper to resolve dot-notation paths (e.g., "user.name") from a data context
+  /*
+   * --------------------------------------------------------------------------
+   * VALUE RESOLUTION
+   * --------------------------------------------------------------------------
+   *
+   * Supports:
+   *
+   * user
+   * user.name
+   * user.profile.name
+   * this
+   * this.name
+   * users.0.name
+   */
+
   const resolveValue = (data, pathStr) => {
-    if (!pathStr) return undefined;
-    const keys = pathStr.split('.');
-    let val = data;
-    for (const k of keys) {
-      val = val !== null && val !== undefined ? val[k] : undefined;
+    if (pathStr === undefined || pathStr === null) {
+      return undefined;
     }
-    return val;
+
+    const cleanPath = String(pathStr).trim();
+
+    if (!cleanPath) {
+      return undefined;
+    }
+
+    if (cleanPath === 'this') {
+      return data ? data.this : undefined;
+    }
+
+    const keys = cleanPath.split('.');
+    let value = data;
+
+    for (const key of keys) {
+      if (value === undefined || value === null) {
+        return undefined;
+      }
+
+      if (
+        typeof value === 'object' ||
+        typeof value === 'function'
+      ) {
+        value = value[key];
+      } else {
+        return undefined;
+      }
+    }
+
+    return value;
   };
 
-  // Formatter for template values supporting strings, numbers, booleans, arrays, objects, and JSON
-  const formatValue = (val, isJsonExplicit = false, isRawHtml = false) => {
-    if (val === undefined || val === null) return '';
-    if (isJsonExplicit || typeof val === 'object' || Array.isArray(val)) {
-      return JSON.stringify(val);
+  /*
+   * --------------------------------------------------------------------------
+   * TEMPLATE LITERALS
+   * --------------------------------------------------------------------------
+   */
+
+  const parseTemplateLiteral = (value) => {
+    const text = String(value).trim();
+
+    if (
+      (text.startsWith('"') && text.endsWith('"')) ||
+      (text.startsWith("'") && text.endsWith("'"))
+    ) {
+      return text.slice(1, -1);
     }
-    const strVal = String(val);
-    return isRawHtml ? strVal : escapeHtml(strVal);
+
+    if (text === 'true') {
+      return true;
+    }
+
+    if (text === 'false') {
+      return false;
+    }
+
+    if (text === 'null') {
+      return null;
+    }
+
+    if (text === 'undefined') {
+      return undefined;
+    }
+
+    if (/^-?\d+(\.\d+)?$/.test(text)) {
+      return Number(text);
+    }
+
+    return text;
   };
+
+  /*
+   * --------------------------------------------------------------------------
+   * TEMPLATE CONDITION EVALUATION
+   * --------------------------------------------------------------------------
+   *
+   * Supported:
+   *
+   * if user
+   * if user.active
+   * if count > 0
+   * if count >= 10
+   * if username == "admin"
+   * if username != "guest"
+   * if status === "online"
+   * if value
+   */
+
+  const isTruthyTemplateValue = (value) => {
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+
+    if (typeof value === 'string') {
+      return value.length > 0;
+    }
+
+    return Boolean(value);
+  };
+
+  const evaluateTemplateCondition = (expression, data) => {
+    const expr = String(expression || '').trim();
+
+    if (!expr) {
+      return false;
+    }
+
+    const comparisonMatch = expr.match(
+      /^([a-zA-Z0-9_.-]+)\s*(===|!==|==|!=|>=|<=|>|<)\s*(.+)$/
+    );
+
+    if (comparisonMatch) {
+      const leftPath = comparisonMatch[1];
+      const operator = comparisonMatch[2];
+      const rightText = comparisonMatch[3];
+
+      const leftValue = resolveValue(data, leftPath);
+      const rightValue = rightText.startsWith('$')
+        ? resolveValue(data, rightText.slice(1))
+        : parseTemplateLiteral(rightText);
+
+      switch (operator) {
+        case '===':
+        case '==':
+          return leftValue === rightValue;
+
+        case '!==':
+        case '!=':
+          return leftValue !== rightValue;
+
+        case '>':
+          return leftValue > rightValue;
+
+        case '<':
+          return leftValue < rightValue;
+
+        case '>=':
+          return leftValue >= rightValue;
+
+        case '<=':
+          return leftValue <= rightValue;
+
+        default:
+          return false;
+      }
+    }
+
+    const value = resolveValue(data, expr);
+
+    return isTruthyTemplateValue(value);
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * TEMPLATE VALUE FORMATTER
+   * --------------------------------------------------------------------------
+   */
+
+  const formatValue = (
+    value,
+    isJsonExplicit = false,
+    isRawHtml = false
+  ) => {
+    if (value === undefined || value === null) {
+      return '';
+    }
+
+    if (isJsonExplicit) {
+      return JSON.stringify(value);
+    }
+
+    if (
+      typeof value === 'object' ||
+      Array.isArray(value)
+    ) {
+      return escapeHtml(JSON.stringify(value));
+    }
+
+    const stringValue = String(value);
+
+    if (isRawHtml) {
+      return stringValue;
+    }
+
+    return escapeHtml(stringValue);
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * TEMPLATE ENGINE
+   * --------------------------------------------------------------------------
+   *
+   * Supported syntax:
+   *
+   * {{username}}
+   *
+   * {{user.name}}
+   *
+   * {{if user}}
+   *   ...
+   * {{else}}
+   *   ...
+   * {{endif}}
+   *
+   * {{if user.admin}}
+   *   ...
+   * {{elseif user.moderator}}
+   *   ...
+   * {{else}}
+   *   ...
+   * {{endif}}
+   *
+   * {{unless loggedIn}}
+   *   ...
+   * {{endunless}}
+   *
+   * {{each users}}
+   *   {{this.name}}
+   * {{endeach}}
+   *
+   * {{with user}}
+   *   {{this.name}}
+   * {{endwith}}
+   *
+   * {{json user}}
+   *
+   * {{{html}}}
+   */
 
   const renderTemplate = (filePath, data = {}) => {
     if (!fs.existsSync(filePath)) {
-      throw new Error(`Template view not found at path: ${filePath}`);
+      throw new Error(
+        `Template view not found at path: ${filePath}`
+      );
     }
-    let templateContent = fs.readFileSync(filePath, 'utf-8');
 
-    // 1. Handle loops: {{each collectionName}}...{{this.prop}}...{{endeach}}
-    const eachRegex = /\{\{\s*each\s+([a-zA-Z0-9_.-]+)\s*\}\}([\s\S]*?)\{\{\s*endeach\s*\}\}/g;
-    templateContent = templateContent.replace(eachRegex, (match, collectionKey, loopBlock) => {
-      const collection = resolveValue(data, collectionKey);
-      if (!Array.isArray(collection) || collection.length === 0) return '';
-      
-      return collection.map(item => {
-        let renderedItem = loopBlock;
-        // Support `{{this}}`, `{{this.property}}`, or direct property lookup if item is an object
-        const itemContext = (typeof item === 'object' && item !== null) ? { ...data, this: item, ...item } : { ...data, this: item };
-        
-        // Replace inner variables in the loop item
-        renderedItem = renderedItem.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (m, key) => {
-          const val = resolveValue(itemContext, key);
-          return formatValue(val);
-        });
-        return renderedItem;
-      }).join('');
-    });
+    const templateContent = fs.readFileSync(
+      filePath,
+      'utf-8'
+    );
 
-    // 2. Handle conditional blocks: {{if condition}}...{{else}}...{{endif}}
-    const ifRegex = /\{\{\s*if\s+([a-zA-Z0-9_.-]+)\s*\}\}([\s\S]*?)(?:\{\{\s*else\s*\}\}([\s\S]*?))?\{\{\s*endif\s*\}\}/g;
-    templateContent = templateContent.replace(ifRegex, (match, conditionKey, trueBlock, falseBlock = '') => {
-      const val = resolveValue(data, conditionKey);
-      const isTruthy = Boolean(val) && (Array.isArray(val) ? val.length > 0 : true);
-      return isTruthy ? trueBlock : falseBlock;
-    });
-
-    // 3. Handle standard errors array/string template injection
-    let errorsHtml = '';
-    if (data.errors) {
-      if (Array.isArray(data.errors)) {
-        errorsHtml = data.errors.map(err => `<div class="error-item">${escapeHtml(err)}</div>`).join('');
-      } else if (typeof data.errors === 'string' && data.errors.trim() !== '') {
-        errorsHtml = `<div class="error-item">${escapeHtml(data.errors)}</div>`;
-      }
-    }
-    templateContent = templateContent.replace(/\{\{\s*errors\s*\}\}/g, errorsHtml);
-
-    // 4. Handle explicit JSON directives: {{json messages}} or {{json user}}
-    const jsonRegex = /\{\{\s*json\s+([a-zA-Z0-9_.-]+)\s*\}\}/g;
-    templateContent = templateContent.replace(jsonRegex, (match, key) => {
-      const val = resolveValue(data, key);
-      return formatValue(val, true);
-    });
-
-    // 5. Handle raw HTML output without escaping: {{{html}}}
-    const rawHtmlRegex = /\{\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}\}/g;
-    templateContent = templateContent.replace(rawHtmlRegex, (match, key) => {
-      const val = resolveValue(data, key);
-      return formatValue(val, false, true);
-    });
-
-    // 6. Handle standard variable tags: {{username}}, {{messages}} (auto-serialized if object/array)
-    const varRegex = /\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g;
-    templateContent = templateContent.replace(varRegex, (match, key) => {
-      const val = resolveValue(data, key);
-      return formatValue(val);
-    });
-
-    return templateContent;
+    return renderTemplateString(templateContent, data);
   };
+
+  const renderTemplateString = (
+    template,
+    context
+  ) => {
+    const tagRegex = /\{\{\{[\s\S]*?\}\}\}|\{\{[\s\S]*?\}\}/g;
+
+    const findMatchingBlock = (
+      source,
+      startPosition,
+      openName,
+      closeName
+    ) => {
+      let depth = 1;
+      let position = startPosition;
+
+      const regex =
+        /\{\{\s*([a-zA-Z]+)(?:\s+([^}]*?))?\s*\}\}/g;
+
+      regex.lastIndex = startPosition;
+
+      while (true) {
+        const match = regex.exec(source);
+
+        if (!match) {
+          return null;
+        }
+
+        const command = match[1].toLowerCase();
+
+        if (command === openName) {
+          depth++;
+        }
+
+        if (command === closeName) {
+          depth--;
+
+          if (depth === 0) {
+            return {
+              content: source.slice(
+                startPosition,
+                match.index
+              ),
+              endPosition: regex.lastIndex
+            };
+          }
+        }
+
+        position = regex.lastIndex;
+      }
+    };
+
+    const renderSection = (
+      source,
+      localContext
+    ) => {
+      let output = '';
+      let position = 0;
+
+      const tokenRegex =
+        /\{\{\{[\s\S]*?\}\}\}|\{\{[\s\S]*?\}\}/g;
+
+      while (true) {
+        const match = tokenRegex.exec(source);
+
+        if (!match) {
+          output += source.slice(position);
+          break;
+        }
+
+        output += source.slice(
+          position,
+          match.index
+        );
+
+        const rawToken = match[0];
+
+        /*
+         * --------------------------------------------------------------
+         * RAW HTML
+         * --------------------------------------------------------------
+         */
+
+        if (rawToken.startsWith('{{{')) {
+          const key = rawToken
+            .slice(3, -3)
+            .trim();
+
+          const value = resolveValue(
+            localContext,
+            key
+          );
+
+          output += formatValue(
+            value,
+            false,
+            true
+          );
+
+          position = tokenRegex.lastIndex;
+          continue;
+        }
+
+        const inner = rawToken
+          .slice(2, -2)
+          .trim();
+
+        /*
+         * --------------------------------------------------------------
+         * STANDARD VARIABLE
+         * --------------------------------------------------------------
+         */
+
+        if (
+          inner &&
+          !inner.startsWith('if ') &&
+          inner !== 'if' &&
+          !inner.startsWith('elseif ') &&
+          inner !== 'else' &&
+          inner !== 'endif' &&
+          !inner.startsWith('each ') &&
+          inner !== 'endeach' &&
+          !inner.startsWith('unless ') &&
+          inner !== 'unless' &&
+          inner !== 'endunless' &&
+          !inner.startsWith('with ') &&
+          inner !== 'with' &&
+          inner !== 'endwith' &&
+          !inner.startsWith('json ')
+        ) {
+          const value = resolveValue(
+            localContext,
+            inner
+          );
+
+          output += formatValue(value);
+
+          position = tokenRegex.lastIndex;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * JSON
+         * --------------------------------------------------------------
+         */
+
+        if (inner.startsWith('json ')) {
+          const key = inner
+            .slice(5)
+            .trim();
+
+          const value = resolveValue(
+            localContext,
+            key
+          );
+
+          output += formatValue(
+            value,
+            true,
+            false
+          );
+
+          position = tokenRegex.lastIndex;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * IF
+         * --------------------------------------------------------------
+         */
+
+        if (
+          inner === 'if' ||
+          inner.startsWith('if ')
+        ) {
+          const condition =
+            inner.slice(2).trim();
+
+          const block =
+            findMatchingBlock(
+              source,
+              tokenRegex.lastIndex,
+              'if',
+              'endif'
+            );
+
+          if (!block) {
+            throw new Error(
+              'Template error: missing {{endif}}'
+            );
+          }
+
+          const blockText = block.content;
+
+          const branches = [];
+
+          const branchRegex =
+            /\{\{\s*(elseif\s+[^}]+|else)\s*\}\}/g;
+
+          let branchPosition = 0;
+          let branchMatch;
+
+          while (
+            (branchMatch =
+              branchRegex.exec(blockText))
+          ) {
+            branches.push({
+              type: branchPosition === 0
+                ? 'if'
+                : branches[branches.length - 1].type === 'else'
+                  ? 'else'
+                  : branchMatch[1].startsWith('elseif')
+                    ? 'elseif'
+                    : 'else',
+
+              condition:
+                branchPosition === 0
+                  ? condition
+                  : branchMatch[1]
+                      .replace(/^elseif\s+/, '')
+                      .trim(),
+
+              content: blockText.slice(
+                branchPosition,
+                branchMatch.index
+              )
+            });
+
+            branchPosition =
+              branchRegex.lastIndex;
+          }
+
+          if (branchPosition < blockText.length) {
+            const finalText =
+              blockText.slice(branchPosition);
+
+            if (branches.length === 0) {
+              branches.push({
+                type: 'if',
+                condition: condition,
+                content: finalText
+              });
+            } else {
+              branches.push({
+                type: 'else',
+                condition: '',
+                content: finalText
+              });
+            }
+          }
+
+          let branchRendered = false;
+
+          for (const branch of branches) {
+            if (
+              branch.type === 'else' ||
+              evaluateTemplateCondition(
+                branch.condition,
+                localContext
+              )
+            ) {
+              output += renderSection(
+                branch.content,
+                localContext
+              );
+
+              branchRendered = true;
+              break;
+            }
+          }
+
+          if (!branchRendered) {
+            /*
+             * No branch matched.
+             */
+          }
+
+          tokenRegex.lastIndex =
+            block.endPosition;
+
+          position = block.endPosition;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * UNLESS
+         * --------------------------------------------------------------
+         */
+
+        if (
+          inner === 'unless' ||
+          inner.startsWith('unless ')
+        ) {
+          const condition =
+            inner.slice(6).trim();
+
+          const block =
+            findMatchingBlock(
+              source,
+              tokenRegex.lastIndex,
+              'unless',
+              'endunless'
+            );
+
+          if (!block) {
+            throw new Error(
+              'Template error: missing {{endunless}}'
+            );
+          }
+
+          if (
+            !evaluateTemplateCondition(
+              condition,
+              localContext
+            )
+          ) {
+            output += renderSection(
+              block.content,
+              localContext
+            );
+          }
+
+          tokenRegex.lastIndex =
+            block.endPosition;
+
+          position = block.endPosition;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * EACH
+         * --------------------------------------------------------------
+         */
+
+        if (
+          inner.startsWith('each ')
+        ) {
+          const collectionKey =
+            inner.slice(5).trim();
+
+          const block =
+            findMatchingBlock(
+              source,
+              tokenRegex.lastIndex,
+              'each',
+              'endeach'
+            );
+
+          if (!block) {
+            throw new Error(
+              'Template error: missing {{endeach}}'
+            );
+          }
+
+          const collection =
+            resolveValue(
+              localContext,
+              collectionKey
+            );
+
+          if (
+            Array.isArray(collection) &&
+            collection.length > 0
+          ) {
+            for (
+              let index = 0;
+              index < collection.length;
+              index++
+            ) {
+              const item =
+                collection[index];
+
+              const itemContext =
+                typeof item === 'object' &&
+                item !== null
+                  ? {
+                      ...localContext,
+                      this: item,
+                      index: index,
+                      first: index === 0,
+                      last:
+                        index ===
+                        collection.length - 1,
+                      ...item
+                    }
+                  : {
+                      ...localContext,
+                      this: item,
+                      index: index,
+                      first: index === 0,
+                      last:
+                        index ===
+                        collection.length - 1
+                    };
+
+              output += renderSection(
+                block.content,
+                itemContext
+              );
+            }
+          }
+
+          tokenRegex.lastIndex =
+            block.endPosition;
+
+          position = block.endPosition;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * WITH
+         * --------------------------------------------------------------
+         */
+
+        if (
+          inner.startsWith('with ')
+        ) {
+          const valueKey =
+            inner.slice(5).trim();
+
+          const block =
+            findMatchingBlock(
+              source,
+              tokenRegex.lastIndex,
+              'with',
+              'endwith'
+            );
+
+          if (!block) {
+            throw new Error(
+              'Template error: missing {{endwith}}'
+            );
+          }
+
+          const value =
+            resolveValue(
+              localContext,
+              valueKey
+            );
+
+          if (
+            value !== undefined &&
+            value !== null
+          ) {
+            const withContext =
+              typeof value === 'object'
+                ? {
+                    ...localContext,
+                    this: value,
+                    ...value
+                  }
+                : {
+                    ...localContext,
+                    this: value
+                  };
+
+            output += renderSection(
+              block.content,
+              withContext
+            );
+          }
+
+          tokenRegex.lastIndex =
+            block.endPosition;
+
+          position = block.endPosition;
+          continue;
+        }
+
+        /*
+         * --------------------------------------------------------------
+         * END/ELSE TOKENS
+         *
+         * These are consumed by the parent block processor.
+         * --------------------------------------------------------------
+         */
+
+        position = tokenRegex.lastIndex;
+      }
+
+      return output;
+    };
+
+    return renderSection(
+      template,
+      {
+        ...context,
+        this: context
+      }
+    );
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * DATABASE DRIVER
+   * --------------------------------------------------------------------------
+   */
 
   const dbConfig = options.database || {};
+
   const databaseDriver = {
     type: dbConfig.type || 'local',
-    connectionString: dbConfig.url || null,
-    query: async (queryStr, params = []) => {
-      if (typeof dbConfig.query === 'function') {
-        return await dbConfig.query(queryStr, params);
+
+    connectionString:
+      dbConfig.url || null,
+
+    query: async (
+      queryString,
+      params = []
+    ) => {
+      if (
+        typeof dbConfig.query ===
+        'function'
+      ) {
+        return await dbConfig.query(
+          queryString,
+          params
+        );
       }
-      if (dbConfig.url && dbConfig.url.startsWith('http')) {
-        const res = await fetch(dbConfig.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(dbConfig.headers || {}) },
-          body: JSON.stringify({ query: queryStr, params })
-        });
-        return await res.json();
+
+      if (
+        dbConfig.url &&
+        dbConfig.url.startsWith('http')
+      ) {
+        const response =
+          await fetch(
+            dbConfig.url,
+            {
+              method: 'POST',
+
+              headers: {
+                'Content-Type':
+                  'application/json',
+
+                ...(dbConfig.headers || {})
+              },
+
+              body: JSON.stringify({
+                query: queryString,
+                params: params
+              })
+            }
+          );
+
+        return await response.json();
       }
-      throw new Error('No database driver or query handler configured.');
+
+      throw new Error(
+        'No database driver or query handler configured.'
+      );
     }
   };
+
+  /*
+   * --------------------------------------------------------------------------
+   * STORAGE ENGINE
+   * --------------------------------------------------------------------------
+   */
 
   const storageEngine = {
-    saveLocal: async (fileObject, destinationPath) => {
-      const dir = path.dirname(destinationPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      await fs.promises.writeFile(destinationPath, fileObject.buffer);
-      return { path: destinationPath, size: fileObject.buffer.length };
+    saveLocal: async (
+      fileObject,
+      destinationPath
+    ) => {
+      const directory =
+        path.dirname(destinationPath);
+
+      if (!fs.existsSync(directory)) {
+        fs.mkdirSync(
+          directory,
+          {
+            recursive: true
+          }
+        );
+      }
+
+      await fs.promises.writeFile(
+        destinationPath,
+        fileObject.buffer
+      );
+
+      return {
+        path: destinationPath,
+        size: fileObject.buffer.length
+      };
     },
-    uploadToUrl: async (fileObject, targetUrl, options = {}) => {
-      const response = await fetch(targetUrl, {
-        method: options.method || 'PUT',
-        headers: { 'Content-Type': fileObject.mimetype || 'application/octet-stream', ...(options.headers || {}) },
-        body: fileObject.buffer
-      });
-      return { status: response.status, statusText: response.statusText, ok: response.ok };
+
+    uploadToUrl: async (
+      fileObject,
+      targetUrl,
+      uploadOptions = {}
+    ) => {
+      const response =
+        await fetch(
+          targetUrl,
+          {
+            method:
+              uploadOptions.method ||
+              'PUT',
+
+            headers: {
+              'Content-Type':
+                fileObject.mimetype ||
+                'application/octet-stream',
+
+              ...(uploadOptions.headers ||
+                {})
+            },
+
+            body: fileObject.buffer
+          }
+        );
+
+      return {
+        status: response.status,
+        statusText:
+          response.statusText,
+        ok: response.ok
+      };
     },
-    readLocal: async (filePath) => {
-      return await fs.promises.readFile(filePath);
+
+    readLocal: async (
+      filePath
+    ) => {
+      return await fs.promises.readFile(
+        filePath
+      );
     }
   };
 
-  const registerRoute = (method, pathPattern, handler, routeMiddlewares = []) => {
-    const m = method.toUpperCase();
-    if (!routes[m]) routes[m] = [];
-    const paramNames = [];
-    const regexPattern = '^' + pathPattern
-      .replace(/:([a-zA-Z0-9_]+)/g, (_, paramName) => {
-        paramNames.push(paramName);
-        return '([^/]+)';
-      })
-      .replace(/\//g, '\\/') + '\\/?$';
+  /*
+   * --------------------------------------------------------------------------
+   * ROUTE REGISTRATION
+   * --------------------------------------------------------------------------
+   */
 
-    routes[m].push({
-      pattern: new RegExp(regexPattern),
-      paramNames: paramNames,
-      middlewares: routeMiddlewares,
-      handler: handler
+  const registerRoute = (
+    method,
+    pathPattern,
+    handler,
+    routeMiddlewares = []
+  ) => {
+    const normalizedMethod =
+      method.toUpperCase();
+
+    if (!routes[normalizedMethod]) {
+      routes[normalizedMethod] = [];
+    }
+
+    const paramNames = [];
+
+    let regexPattern =
+      String(pathPattern);
+
+    /*
+     * Escape regex-sensitive characters,
+     * while preserving :parameters.
+     */
+
+    regexPattern = regexPattern
+      .replace(
+        /([.+?^=!:${}()|[\]\\])/g,
+        '\\$1'
+      )
+      .replace(
+        /\\:([a-zA-Z0-9_]+)/g,
+        (_, parameterName) => {
+          paramNames.push(
+            parameterName
+          );
+
+          return '([^/]+)';
+        }
+      );
+
+    regexPattern =
+      '^' +
+      regexPattern +
+      '\\/?$';
+
+    routes[normalizedMethod].push({
+      pattern:
+        new RegExp(regexPattern),
+
+      paramNames:
+        paramNames,
+
+      middlewares:
+        routeMiddlewares,
+
+      handler:
+        handler
     });
   };
 
-  const requestHandler = async (req, res) => {
-    const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`); 
-    const pathname = decodeURIComponent(urlObj.pathname);  
-    const method = req.method.toUpperCase(); 
-     
-    if (options.cors) { 
-      const origin = options.cors.origin || '*'; 
-      const methods = options.cors.methods || 'GET,POST,PUT,DELETE,PATCH,OPTIONS'; 
-      const headers = options.cors.headers || 'Content-Type, Authorization'; 
-       
-      res.setHeader('Access-Control-Allow-Origin', origin); 
-      res.setHeader('Access-Control-Allow-Methods', methods); 
-      res.setHeader('Access-Control-Allow-Headers', headers); 
+  /*
+   * --------------------------------------------------------------------------
+   * COOKIE PARSING
+   * --------------------------------------------------------------------------
+   */
 
-      if (method === 'OPTIONS') { 
-        res.writeHead(204); 
-        return res.end(); 
-      } 
-    } 
+  const parseCookies = (
+    cookieHeader
+  ) => {
+    const cookies = {};
 
-    if (options.staticDir && method === 'GET') { 
-      const staticPath = path.join(options.staticDir, pathname); 
-      if (fs.existsSync(staticPath) && fs.statSync(staticPath).isFile()) { 
-        const ext = path.extname(staticPath).toLowerCase(); 
-        const contentType = MIME_TYPES[ext] || 'application/octet-stream'; 
-        const stat = fs.statSync(staticPath); 
-        const fileSize = stat.size; 
-        const range = req.headers.range; 
+    if (!cookieHeader) {
+      return cookies;
+    }
 
-        if (range) { 
-          const parts = range.replace(/bytes=/, "").split("-"); 
-          const start = parseInt(parts[0], 10); 
-          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1; 
-          const chunksize = (end - start) + 1; 
-          const file = fs.createReadStream(staticPath, { start, end }); 
+    const pieces =
+      String(cookieHeader)
+        .split(';');
 
-          res.writeHead(206, { 
-            'Content-Range': `bytes ${start}-${end}/${fileSize}`, 
-            'Accept-Ranges': 'bytes', 
-            'Content-Length': chunksize, 
-            'Content-Type': contentType, 
-          }); 
-          return file.pipe(res); 
-        } else { 
-          res.writeHead(200, { 
-            'Content-Length': fileSize, 
-            'Content-Type': contentType 
-          }); 
-          return fs.createReadStream(staticPath).pipe(res); 
-        } 
-      } 
-    } 
+    for (const piece of pieces) {
+      const separator =
+        piece.indexOf('=');
 
-    let matchedRoute = null; 
-    let pathParams = {}; 
+      if (separator === -1) {
+        continue;
+      }
 
-    if (routes[method]) { 
-      for (const route of routes[method]) { 
-        const match = pathname.match(route.pattern); 
-        if (match) { 
-          matchedRoute = route; 
-          route.paramNames.forEach((name, index) => { 
-            pathParams[name] = decodeURIComponent(match[index + 1]); 
-          }); 
-          break; 
-        } 
-      } 
-    } 
+      const name =
+        piece
+          .slice(0, separator)
+          .trim();
 
-    if (!matchedRoute) { 
-      res.writeHead(404, { 'Content-Type': 'text/plain' }); 
-      return res.end('404 Not Found'); 
-    } 
+      const value =
+        piece
+          .slice(separator + 1)
+          .trim();
 
-    const rawCookies = req.headers.cookie || ''; 
-    const cookies = {}; 
-    rawCookies.split(';').forEach(cookie => { 
-      const parts = cookie.split('='); 
-      if (parts.length >= 2) cookies[parts[0].trim()] = decodeURIComponent(parts.slice(1).join('=').trim()); 
-    }); 
+      if (!name) {
+        continue;
+      }
 
-    let sessionId = cookies['LOPO_SESSID']; 
-    if (!sessionId || !sessionMemoryStore[sessionId]) { 
-      sessionId = crypto.randomBytes(16).toString('hex'); 
-      sessionMemoryStore[sessionId] = { createdAt: Date.now() }; 
-    } 
-    const session = sessionMemoryStore[sessionId]; 
+      try {
+        cookies[name] =
+          decodeURIComponent(value);
+      } catch {
+        cookies[name] = value;
+      }
+    }
 
-    const query = {}; 
-    for (const [key, val] of urlObj.searchParams.entries()) { 
-      query[decodeURIComponent(key)] = decodeURIComponent(val); 
-    } 
+    return cookies;
+  };
 
-    let body = {}; 
-    let files = {}; 
-    const contentType = req.headers['content-type'] || ''; 
-     
-    if (contentType.includes('multipart/form-data')) { 
-      await new Promise((resolve) => { 
-        let buffer = Buffer.alloc(0); 
-        req.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); }); 
-        req.on('end', () => { 
-          const boundaryMatch = contentType.match(/boundary=(.+)$/); 
-          if (boundaryMatch) { 
-            const boundary = '--' + boundaryMatch[1].replace(/^["']|["']$/g, '').trim(); 
-            const parts = buffer.toString('binary').split(boundary); 
-             
-            body = {}; 
-            files = {}; 
+  /*
+   * --------------------------------------------------------------------------
+   * COOKIE SERIALIZATION
+   * --------------------------------------------------------------------------
+   */
 
-            for (const part of parts) { 
-              if (!part || part === '--\r\n' || part === '--') continue; 
+  const serializeCookie = (
+    name,
+    value,
+    cookieOptions = {}
+  ) => {
+    let cookie =
+      `${name}=${encodeURIComponent(
+        value === undefined ||
+        value === null
+          ? ''
+          : String(value)
+      )}`;
 
-              const headerBodySplit = part.split('\r\n\r\n'); 
-              if (headerBodySplit.length < 2) continue; 
+    if (
+      cookieOptions.maxAge !==
+      undefined &&
+      cookieOptions.maxAge !== null
+    ) {
+      cookie +=
+        `; Max-Age=${Math.max(
+          0,
+          Math.floor(
+            Number(
+              cookieOptions.maxAge
+            )
+          )
+        )}`;
+    }
 
-              const headers = headerBodySplit[0]; 
-              let content = headerBodySplit.slice(1).join('\r\n\r\n'); 
-              // Safer removal of trailing boundary newlines
-              content = content.replace(/\r\n$/, ''); 
+    if (
+      cookieOptions.expires
+    ) {
+      const expires =
+        cookieOptions.expires instanceof Date
+          ? cookieOptions.expires
+          : new Date(
+              cookieOptions.expires
+            );
 
-              const nameMatch = headers.match(/name="([^"]+)"/); 
-              const filenameMatch = headers.match(/filename="([^"]+)"/); 
-              const mimeMatch = headers.match(/Content-Type:\s*([^\r\n]+)/i); 
+      if (!Number.isNaN(
+        expires.getTime()
+      )) {
+        cookie +=
+          `; Expires=${expires.toUTCString()}`;
+      }
+    }
 
-              if (nameMatch) { 
-                const fieldName = nameMatch[1]; 
+    if (
+      cookieOptions.domain
+    ) {
+      cookie +=
+        `; Domain=${cookieOptions.domain}`;
+    }
 
-                if (filenameMatch && filenameMatch[1] !== '') { 
-                  const filename = filenameMatch[1]; 
-                  const ext = path.extname(filename).toLowerCase(); 
-                  const detectedMime = mimeMatch ? mimeMatch[1].trim() : (MIME_TYPES[ext] || 'application/octet-stream'); 
+    if (
+      cookieOptions.path
+    ) {
+      cookie +=
+        `; Path=${cookieOptions.path}`;
+    }
 
-                  files[fieldName] = { 
-                    filename: filename, 
-                    mimetype: detectedMime, 
-                    buffer: Buffer.from(content, 'binary'), 
-                    size: Buffer.byteLength(content, 'binary') 
-                  }; 
-                } else { 
-                  body[fieldName] = Buffer.from(content, 'binary').toString('utf-8'); 
-                } 
-              } 
-            } 
-          } 
-          resolve(); 
-        }); 
-      }); 
-    } else { 
-      let rawBody = ''; 
-      await new Promise((resolve) => { 
-        req.on('data', chunk => { rawBody += chunk; }); 
-        req.on('end', resolve); 
-      }); 
+    if (
+      cookieOptions.httpOnly
+    ) {
+      cookie += '; HttpOnly';
+    }
 
-      if (rawBody) { 
-        if (contentType.includes('application/json')) { 
-          try { body = JSON.parse(rawBody); } catch { body = rawBody; } 
-        } else if (contentType.includes('application/x-www-form-urlencoded')) { 
-          const params = new URLSearchParams(rawBody); 
-          const parsedForm = {}; 
-          for (const [key, val] of params.entries()) { 
-            parsedForm[key] = val; 
-          } 
-          body = parsedForm; 
-        } else { 
-          body = rawBody; 
-        } 
-      } 
-    } 
+    if (
+      cookieOptions.secure
+    ) {
+      cookie += '; Secure';
+    }
 
-    const customReq = { 
-      path: pathname, 
-      method: method, 
-      params: pathParams,  
-      query: query,        
-      body: body, 
-      files: files, 
-      cookies: cookies, 
-      session: session, 
-      headers: req.headers, 
-      storage: storageEngine, 
-      db: databaseDriver 
-    }; 
+    if (
+      cookieOptions.sameSite
+    ) {
+      let sameSite =
+        String(
+          cookieOptions.sameSite
+        );
 
-    const outboundCookiesQueue = []; 
-    const customRes = { 
-      setCookie: function (name, value, opts = {}) { 
-        let str = `${name}=${encodeURIComponent(value)}`; 
-        if (opts.maxAge) str += `; Max-Age=${opts.maxAge}`; 
-        if (opts.httpOnly) str += '; HttpOnly'; 
-        if (opts.path) str += `; Path=${opts.path}`; 
-        if (opts.secure) str += '; Secure'; 
-        if (opts.sameSite) str += `; SameSite=${opts.sameSite}`; 
-        outboundCookiesQueue.push(str); 
-      }, 
-      clearCookie: function (name) { 
-        outboundCookiesQueue.push(`${name}=; Max-Age=0; Path=/`); 
-      }, 
-      status: function (code) { 
-        res.statusCode = code; 
-        return this; 
-      }, 
-      json: function (payload) { 
-        res.writeHead(res.statusCode || 200, { 'Content-Type': 'application/json' }); 
-        res.end(JSON.stringify(payload)); 
-      }, 
-      send: function (data) { 
-        res.writeHead(res.statusCode || 200, { 'Content-Type': 'text/html; charset=utf-8' }); 
-        res.end(String(data ?? '')); 
-      }, 
-      render: function (viewPath, data) { 
-        const viewData = data || {}; 
-        const absolutePath = path.resolve(options.viewsDir || '.', viewPath); 
-        return renderTemplate(absolutePath, viewData); 
-      } 
-    }; 
+      const normalized =
+        sameSite.toLowerCase();
 
-    const combinedChainStack = [...globalMiddlewares, ...matchedRoute.middlewares]; 
-    let activeChainIndex = 0; 
+      if (
+        normalized === 'strict'
+      ) {
+        sameSite = 'Strict';
+      } else if (
+        normalized === 'none'
+      ) {
+        sameSite = 'None';
+      } else {
+        sameSite = 'Lax';
+      }
 
-    const pipelineStepRunner = async () => { 
-      if (activeChainIndex < combinedChainStack.length) { 
-        const nextMiddleware = combinedChainStack[activeChainIndex++]; 
-        let advancedFlag = false; 
-        const nextCallbackTrigger = () => { advancedFlag = true; }; 
-        await evaluator.callFunction(nextMiddleware, [customReq, customRes, nextCallbackTrigger], evaluator.global); 
-         
-        if (advancedFlag) { 
-          await pipelineStepRunner(); 
-        } else { 
-          if (!res.writableEnded) { 
-            res.writeHead(400, { 'Content-Type': 'text/plain' }); 
-            res.end('Request terminated early by system middleware controls.'); 
-          } 
-        } 
-      } else { 
-        try { 
-          const responseOutput = await evaluator.callFunction(matchedRoute.handler, [customReq, customRes], evaluator.global); 
-          if (res.writableEnded) return; 
-          customRes.setCookie('LOPO_SESSID', sessionId, { httpOnly: true, path: '/' }); 
+      cookie +=
+        `; SameSite=${sameSite}`;
+    }
 
-          if (outboundCookiesQueue.length > 0) { 
-            res.setHeader('Set-Cookie', outboundCookiesQueue); 
-          } 
+    return cookie;
+  };
 
-          if (typeof responseOutput === 'object' && responseOutput !== null) { 
-            res.writeHead(res.statusCode || 200, { 'Content-Type': 'application/json' }); 
-            res.end(JSON.stringify(responseOutput)); 
-          } else if (responseOutput !== undefined) { 
-            res.writeHead(res.statusCode || 200, { 'Content-Type': 'text/html; charset=utf-8' }); 
-            res.end(String(responseOutput ?? '')); 
-          } 
-        } catch (err) { 
-          if (!res.writableEnded) { 
-            res.writeHead(500, { 'Content-Type': 'text/plain' }); 
-            res.end(`Internal Server Error Diagnostics: ${err.message}`); 
-          } 
-        } 
-      } 
-    }; 
+  /*
+   * --------------------------------------------------------------------------
+   * SESSION MANAGEMENT
+   * --------------------------------------------------------------------------
+   */
 
-    await pipelineStepRunner(); 
-  }; 
+  const generateSessionId = () => {
+    return crypto
+      .randomBytes(32)
+      .toString('hex');
+  };
 
-  const nodeServer = (options.key && options.cert)  
-    ? https.createServer({ key: fs.readFileSync(options.key), cert: fs.readFileSync(options.cert) }, requestHandler) 
-    : http.createServer(requestHandler); 
+  const createSession = () => {
+    const sessionId =
+      generateSessionId();
 
-  let wsServerInstance = null; 
-  if (options.enableWebSockets) { 
-    wsServerInstance = new WebSocketServer({ noServer: true }); 
-     
-    nodeServer.on('upgrade', (request, socket, head) => { 
-      wsServerInstance.handleUpgrade(request, socket, head, (ws) => { 
-        wsServerInstance.emit('connection', ws, request); 
-      }); 
-    }); 
-  } 
+    const session = {
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now()
+    };
 
-  return { 
-    use: (middlewareFn) => { globalMiddlewares.push(middlewareFn); return null; }, 
-    get: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('GET', path, handler, args); 
-      return null; 
-    }, 
-    post: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('POST', path, handler, args); 
-      return null; 
-    }, 
-    put: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('PUT', path, handler, args); 
-      return null; 
-    }, 
-    patch: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('PATCH', path, handler, args); 
-      return null; 
-    }, 
-    delete: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('DELETE', path, handler, args); 
-      return null; 
-    }, 
-    options: (path, ...args) => { 
-      const handler = args.pop(); 
-      registerRoute('OPTIONS', path, handler, args); 
-      return null; 
-    }, 
-    onWebSocket: (connectionCallback) => { 
-      if (!wsServerInstance) return null; 
-      wsServerInstance.on('connection', (ws, req) => { 
-        const customWsObject = { 
-          send: (msg) => ws.send(typeof msg === 'object' ? JSON.stringify(msg) : String(msg)), 
-          onMessage: (msgCallback) => ws.on('message', (data) => evaluator.callFunction(msgCallback, [data.toString()], evaluator.global)), 
-          onClose: (closeCallback) => ws.on('close', () => evaluator.callFunction(closeCallback, [], evaluator.global)) 
-        }; 
-        evaluator.callFunction(connectionCallback, [customWsObject, req], evaluator.global); 
-      }); 
-      return null; 
-    }, 
-    listen: (port, callback) => { 
-      nodeServer.listen(port, () => { 
-        if (callback) evaluator.callFunction(callback, [port], evaluator.global); 
-      }); 
-      return null; 
-    } 
-  }; 
+    sessionMemoryStore.set(
+      sessionId,
+      session
+    );
+
+    return {
+      id: sessionId,
+      session: session
+    };
+  };
+
+  const destroySessionById = (
+    sessionId
+  ) => {
+    if (!sessionId) {
+      return;
+    }
+
+    sessionMemoryStore.delete(
+      sessionId
+    );
+  };
+
+  const regenerateSession = (
+    oldSessionId
+  ) => {
+    const oldSession =
+      sessionMemoryStore.get(
+        oldSessionId
+      ) || {};
+
+    const newSessionId =
+      generateSessionId();
+
+    const newSession = {
+      ...oldSession,
+
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now()
+    };
+
+    sessionMemoryStore.delete(
+      oldSessionId
+    );
+
+    sessionMemoryStore.set(
+      newSessionId,
+      newSession
+    );
+
+    return {
+      id: newSessionId,
+      session: newSession
+    };
+  };
+
+  /*
+   * Periodically remove expired sessions.
+   */
+
+  const cleanupSessions = () => {
+    const now =
+      Date.now();
+
+    const maxAgeMs =
+      sessionOptions.maxAge *
+      1000;
+
+    for (
+      const [
+        sessionId,
+        session
+      ] of sessionMemoryStore
+    ) {
+      if (
+        now -
+          session.lastAccessedAt >
+        maxAgeMs
+      ) {
+        sessionMemoryStore.delete(
+          sessionId
+        );
+      }
+    }
+  };
+
+  const sessionCleanupTimer =
+    setInterval(
+      cleanupSessions,
+      Math.max(
+        60000,
+        Math.min(
+          sessionOptions.maxAge *
+            1000,
+          3600000
+        )
+      )
+    );
+
+  if (
+    sessionCleanupTimer &&
+    typeof sessionCleanupTimer.unref ===
+      'function'
+  ) {
+    sessionCleanupTimer.unref();
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * SECURITY HEADERS
+   * --------------------------------------------------------------------------
+   */
+
+  const applySecurityHeaders = (
+    res
+  ) => {
+    if (
+      options.securityHeaders === false
+    ) {
+      return;
+    }
+
+    res.setHeader(
+      'X-Content-Type-Options',
+      'nosniff'
+    );
+
+    res.setHeader(
+      'X-Frame-Options',
+      'SAMEORIGIN'
+    );
+
+    res.setHeader(
+      'Referrer-Policy',
+      'strict-origin-when-cross-origin'
+    );
+
+    res.setHeader(
+      'X-XSS-Protection',
+      '0'
+    );
+
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(), microphone=(), geolocation=()'
+    );
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * BODY PARSING
+   * --------------------------------------------------------------------------
+   */
+
+  const parseMultipartBody = async (
+    req,
+    contentType
+  ) => {
+    let buffer =
+      Buffer.alloc(0);
+
+    await new Promise(
+      (resolve) => {
+        req.on(
+          'data',
+          (chunk) => {
+            buffer =
+              Buffer.concat([
+                buffer,
+                chunk
+              ]);
+          }
+        );
+
+        req.on(
+          'end',
+          resolve
+        );
+      }
+    );
+
+    const body = {};
+    const files = {};
+
+    const boundaryMatch =
+      contentType.match(
+        /boundary=(?:"([^"]+)"|([^;]+))/i
+      );
+
+    if (!boundaryMatch) {
+      return {
+        body,
+        files
+      };
+    }
+
+    const boundary =
+      '--' +
+      (
+        boundaryMatch[1] ||
+        boundaryMatch[2]
+      ).trim();
+
+    const parts =
+      buffer
+        .toString('binary')
+        .split(boundary);
+
+    for (
+      const part of parts
+    ) {
+      if (
+        !part ||
+        part === '--' ||
+        part === '--\r\n'
+      ) {
+        continue;
+      }
+
+      const split =
+        part.split(
+          '\r\n\r\n'
+        );
+
+      if (
+        split.length < 2
+      ) {
+        continue;
+      }
+
+      const headerText =
+        split[0];
+
+      let content =
+        split
+          .slice(1)
+          .join('\r\n\r\n');
+
+      content =
+        content.replace(
+          /\r\n$/,
+          ''
+        );
+
+      const nameMatch =
+        headerText.match(
+          /name="([^"]+)"/i
+        );
+
+      if (!nameMatch) {
+        continue;
+      }
+
+      const fieldName =
+        nameMatch[1];
+
+      const filenameMatch =
+        headerText.match(
+          /filename="([^"]*)"/i
+        );
+
+      const mimeMatch =
+        headerText.match(
+          /Content-Type:\s*([^\r\n]+)/i
+        );
+
+      if (
+        filenameMatch &&
+        filenameMatch[1]
+      ) {
+        const filename =
+          filenameMatch[1];
+
+        const extension =
+          path
+            .extname(filename)
+            .toLowerCase();
+
+        const mimetype =
+          mimeMatch
+            ? mimeMatch[1].trim()
+            : (
+                MIME_TYPES[
+                  extension
+                ] ||
+                'application/octet-stream'
+              );
+
+        const fileBuffer =
+          Buffer.from(
+            content,
+            'binary'
+          );
+
+        files[fieldName] = {
+          filename:
+            path.basename(filename),
+
+          mimetype:
+            mimetype,
+
+          buffer:
+            fileBuffer,
+
+          size:
+            fileBuffer.length
+        };
+      } else {
+        body[fieldName] =
+          Buffer
+            .from(
+              content,
+              'binary'
+            )
+            .toString('utf-8');
+      }
+    }
+
+    return {
+      body,
+      files
+    };
+  };
+
+  const parseRequestBody = async (
+    req
+  ) => {
+    const contentType =
+      req.headers[
+        'content-type'
+      ] || '';
+
+    if (
+      contentType.includes(
+        'multipart/form-data'
+      )
+    ) {
+      return await parseMultipartBody(
+        req,
+        contentType
+      );
+    }
+
+    let rawBody = '';
+
+    await new Promise(
+      (resolve) => {
+        req.on(
+          'data',
+          (chunk) => {
+            rawBody +=
+              chunk.toString();
+          }
+        );
+
+        req.on(
+          'end',
+          resolve
+        );
+      }
+    );
+
+    if (!rawBody) {
+      return {
+        body: {},
+        files: {}
+      };
+    }
+
+    if (
+      contentType.includes(
+        'application/json'
+      )
+    ) {
+      try {
+        return {
+          body:
+            JSON.parse(
+              rawBody
+            ),
+          files: {}
+        };
+      } catch {
+        return {
+          body: rawBody,
+          files: {}
+        };
+      }
+    }
+
+    if (
+      contentType.includes(
+        'application/x-www-form-urlencoded'
+      )
+    ) {
+      const params =
+        new URLSearchParams(
+          rawBody
+        );
+
+      const body = {};
+
+      for (
+        const [
+          key,
+          value
+        ] of params.entries()
+      ) {
+        body[key] = value;
+      }
+
+      return {
+        body,
+        files: {}
+      };
+    }
+
+    return {
+      body: rawBody,
+      files: {}
+    };
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * STATIC FILE SECURITY
+   * --------------------------------------------------------------------------
+   */
+
+  const resolveStaticPath = (
+    staticDirectory,
+    pathname
+  ) => {
+    const root =
+      path.resolve(
+        staticDirectory
+      );
+
+    const requested =
+      decodeURIComponent(
+        pathname
+      );
+
+    const candidate =
+      path.resolve(
+        root,
+        '.' + requested
+      );
+
+    if (
+      candidate !== root &&
+      !candidate.startsWith(
+        root + path.sep
+      )
+    ) {
+      return null;
+    }
+
+    return candidate;
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * REQUEST HANDLER
+   * --------------------------------------------------------------------------
+   */
+
+  const requestHandler = async (
+    req,
+    res
+  ) => {
+    try {
+      applySecurityHeaders(res);
+
+      const host =
+        req.headers.host ||
+        'localhost';
+
+      const protocol =
+        options.key &&
+        options.cert
+          ? 'https'
+          : 'http';
+
+      const urlObj =
+        new URL(
+          req.url,
+          `${protocol}://${host}`
+        );
+
+      const pathname =
+        decodeURIComponent(
+          urlObj.pathname
+        );
+
+      const method =
+        String(
+          req.method || 'GET'
+        ).toUpperCase();
+
+      /*
+       * --------------------------------------------------------------
+       * CORS
+       * --------------------------------------------------------------
+       */
+
+      if (options.cors) {
+        const origin =
+          options.cors.origin ||
+          '*';
+
+        const methods =
+          options.cors.methods ||
+          'GET,POST,PUT,DELETE,PATCH,OPTIONS';
+
+        const headers =
+          options.cors.headers ||
+          'Content-Type, Authorization';
+
+        res.setHeader(
+          'Access-Control-Allow-Origin',
+          origin
+        );
+
+        res.setHeader(
+          'Access-Control-Allow-Methods',
+          methods
+        );
+
+        res.setHeader(
+          'Access-Control-Allow-Headers',
+          headers
+        );
+
+        if (
+          options.cors.credentials
+        ) {
+          res.setHeader(
+            'Access-Control-Allow-Credentials',
+            'true'
+          );
+        }
+
+        if (
+          method === 'OPTIONS'
+        ) {
+          res.writeHead(
+            204
+          );
+
+          return res.end();
+        }
+      }
+
+      /*
+       * --------------------------------------------------------------
+       * STATIC FILES
+       * --------------------------------------------------------------
+       */
+
+      if (
+        options.staticDir &&
+        method === 'GET'
+      ) {
+        const staticPath =
+          resolveStaticPath(
+            options.staticDir,
+            pathname
+          );
+
+        if (
+          staticPath &&
+          fs.existsSync(
+            staticPath
+          ) &&
+          fs.statSync(
+            staticPath
+          ).isFile()
+        ) {
+          const extension =
+            path
+              .extname(
+                staticPath
+              )
+              .toLowerCase();
+
+          const contentType =
+            MIME_TYPES[
+              extension
+            ] ||
+            'application/octet-stream';
+
+          const stat =
+            fs.statSync(
+              staticPath
+            );
+
+          const fileSize =
+            stat.size;
+
+          const range =
+            req.headers.range;
+
+          if (range) {
+            const match =
+              range.match(
+                /bytes=(\d*)-(\d*)/
+              );
+
+            if (!match) {
+              res.writeHead(
+                416
+              );
+
+              return res.end();
+            }
+
+            let start =
+              match[1]
+                ? parseInt(
+                    match[1],
+                    10
+                  )
+                : 0;
+
+            let end =
+              match[2]
+                ? parseInt(
+                    match[2],
+                    10
+                  )
+                : fileSize - 1;
+
+            if (
+              start >= fileSize ||
+              end >= fileSize ||
+              start > end
+            ) {
+              res.writeHead(
+                416,
+                {
+                  'Content-Range':
+                    `bytes */${fileSize}`
+                }
+              );
+
+              return res.end();
+            }
+
+            const chunkSize =
+              end - start + 1;
+
+            res.writeHead(
+              206,
+              {
+                'Content-Range':
+                  `bytes ${start}-${end}/${fileSize}`,
+
+                'Accept-Ranges':
+                  'bytes',
+
+                'Content-Length':
+                  chunkSize,
+
+                'Content-Type':
+                  contentType
+              }
+            );
+
+            return fs
+              .createReadStream(
+                staticPath,
+                {
+                  start,
+                  end
+                }
+              )
+              .pipe(res);
+          }
+
+          res.writeHead(
+            200,
+            {
+              'Content-Length':
+                fileSize,
+
+              'Content-Type':
+                contentType,
+
+              'Accept-Ranges':
+                'bytes'
+            }
+          );
+
+          return fs
+            .createReadStream(
+              staticPath
+            )
+            .pipe(res);
+        }
+      }
+
+      /*
+       * --------------------------------------------------------------
+       * ROUTE MATCHING
+       * --------------------------------------------------------------
+       */
+
+      let matchedRoute =
+        null;
+
+      let pathParams = {};
+
+      if (
+        routes[method]
+      ) {
+        for (
+          const route of
+            routes[method]
+        ) {
+          const match =
+            pathname.match(
+              route.pattern
+            );
+
+          if (match) {
+            matchedRoute =
+              route;
+
+            route.paramNames.forEach(
+              (
+                name,
+                index
+              ) => {
+                pathParams[name] =
+                  decodeURIComponent(
+                    match[
+                      index + 1
+                    ]
+                  );
+              }
+            );
+
+            break;
+          }
+        }
+      }
+
+      if (!matchedRoute) {
+        res.writeHead(
+          404,
+          {
+            'Content-Type':
+              'text/plain; charset=utf-8'
+          }
+        );
+
+        return res.end(
+          '404 Not Found'
+        );
+      }
+
+      /*
+       * --------------------------------------------------------------
+       * COOKIES
+       * --------------------------------------------------------------
+       */
+
+      const cookies =
+        parseCookies(
+          req.headers.cookie
+        );
+
+      /*
+       * --------------------------------------------------------------
+       * SESSION
+       * --------------------------------------------------------------
+       */
+
+      let sessionId =
+        cookies[
+          sessionOptions.cookieName
+        ];
+
+      let session;
+
+      let newSession =
+        false;
+
+      if (
+        !sessionId ||
+        !sessionMemoryStore.has(
+          sessionId
+        )
+      ) {
+        const created =
+          createSession();
+
+        sessionId =
+          created.id;
+
+        session =
+          created.session;
+
+        newSession =
+          true;
+      } else {
+        session =
+          sessionMemoryStore.get(
+            sessionId
+          );
+
+        const expired =
+          Date.now() -
+            session.lastAccessedAt >
+          sessionOptions.maxAge *
+            1000;
+
+        if (expired) {
+          sessionMemoryStore.delete(
+            sessionId
+          );
+
+          const created =
+            createSession();
+
+          sessionId =
+            created.id;
+
+          session =
+            created.session;
+
+          newSession =
+            true;
+        }
+      }
+
+      session.lastAccessedAt =
+        Date.now();
+
+      /*
+       * --------------------------------------------------------------
+       * QUERY PARAMETERS
+       * --------------------------------------------------------------
+       */
+
+      const query = {};
+
+      for (
+        const [
+          key,
+          value
+        ] of urlObj.searchParams.entries()
+      ) {
+        query[key] = value;
+      }
+
+      /*
+       * --------------------------------------------------------------
+       * REQUEST BODY
+       * --------------------------------------------------------------
+       */
+
+      let body = {};
+      let files = {};
+
+      if (
+        method !== 'GET' &&
+        method !== 'HEAD' &&
+        method !== 'OPTIONS'
+      ) {
+        const parsed =
+          await parseRequestBody(
+            req
+          );
+
+        body =
+          parsed.body;
+
+        files =
+          parsed.files;
+      }
+
+      /*
+       * --------------------------------------------------------------
+       * CUSTOM REQUEST
+       * --------------------------------------------------------------
+       */
+
+      const customReq = {
+        path:
+          pathname,
+
+        method:
+          method,
+
+        params:
+          pathParams,
+
+        query:
+          query,
+
+        body:
+          body,
+
+        files:
+          files,
+
+        cookies:
+          cookies,
+
+        session:
+          session,
+
+        sessionId:
+          sessionId,
+
+        headers:
+          req.headers,
+
+        storage:
+          storageEngine,
+
+        db:
+          databaseDriver,
+
+        raw:
+          req
+      };
+
+      /*
+       * --------------------------------------------------------------
+       * RESPONSE COOKIE QUEUE
+       * --------------------------------------------------------------
+       */
+
+      const outboundCookiesQueue =
+        [];
+
+      /*
+       * --------------------------------------------------------------
+       * CUSTOM RESPONSE
+       * --------------------------------------------------------------
+       */
+
+      const customRes = {
+        setCookie: (
+          name,
+          value,
+          cookieOptions = {}
+        ) => {
+          const serialized =
+            serializeCookie(
+              name,
+              value,
+              cookieOptions
+            );
+
+          outboundCookiesQueue.push(
+            serialized
+          );
+
+          return customRes;
+        },
+
+        clearCookie: (
+          name,
+          cookieOptions = {}
+        ) => {
+          outboundCookiesQueue.push(
+            serializeCookie(
+              name,
+              '',
+              {
+                ...cookieOptions,
+
+                maxAge: 0,
+
+                expires:
+                  new Date(0),
+
+                path:
+                  cookieOptions.path ||
+                  '/'
+              }
+            )
+          );
+
+          return customRes;
+        },
+
+        status: (
+          code
+        ) => {
+          res.statusCode =
+            Number(code);
+
+          return customRes;
+        },
+
+        json: (
+          payload
+        ) => {
+          if (
+            res.writableEnded
+          ) {
+            return customRes;
+          }
+
+          if (
+            outboundCookiesQueue.length >
+            0
+          ) {
+            res.setHeader(
+              'Set-Cookie',
+              outboundCookiesQueue
+            );
+          }
+
+          res.setHeader(
+            'Content-Type',
+            'application/json; charset=utf-8'
+          );
+
+          res.writeHead(
+            res.statusCode || 200
+          );
+
+          res.end(
+            JSON.stringify(
+              payload
+            )
+          );
+
+          return customRes;
+        },
+
+        send: (
+          data
+        ) => {
+          if (
+            res.writableEnded
+          ) {
+            return customRes;
+          }
+
+          if (
+            outboundCookiesQueue.length >
+            0
+          ) {
+            res.setHeader(
+              'Set-Cookie',
+              outboundCookiesQueue
+            );
+          }
+
+          res.setHeader(
+            'Content-Type',
+            'text/html; charset=utf-8'
+          );
+
+          res.writeHead(
+            res.statusCode || 200
+          );
+
+          res.end(
+            String(
+              data === undefined ||
+              data === null
+                ? ''
+                : data
+            )
+          );
+
+          return customRes;
+        },
+
+        redirect: (
+          location,
+          code = 302
+        ) => {
+          if (
+            res.writableEnded
+          ) {
+            return customRes;
+          }
+
+          if (
+            outboundCookiesQueue.length >
+            0
+          ) {
+            res.setHeader(
+              'Set-Cookie',
+              outboundCookiesQueue
+            );
+          }
+
+          res.statusCode =
+            Number(code);
+
+          res.setHeader(
+            'Location',
+            String(location)
+          );
+
+          res.end();
+
+          return customRes;
+        },
+
+        render: (
+          viewPath,
+          data = {}
+        ) => {
+          const absolutePath =
+            path.resolve(
+              options.viewsDir || '.',
+              viewPath
+            );
+
+          return renderTemplate(
+            absolutePath,
+            data
+          );
+        },
+
+        regenerateSession: () => {
+          const regenerated =
+            regenerateSession(
+              customReq.sessionId
+            );
+
+          customReq.sessionId =
+            regenerated.id;
+
+          customReq.session =
+            regenerated.session;
+
+          sessionId =
+            regenerated.id;
+
+          session =
+            regenerated.session;
+
+          return customReq.session;
+        },
+
+        destroySession: () => {
+          destroySessionById(
+            customReq.sessionId
+          );
+
+          customReq.sessionId =
+            null;
+
+          customReq.session =
+            {};
+
+          sessionId =
+            null;
+
+          session =
+            {};
+
+          customRes.clearCookie(
+            sessionOptions.cookieName,
+            {
+              path:
+                sessionOptions.path,
+              httpOnly:
+                sessionOptions.httpOnly,
+              secure:
+                sessionOptions.secure,
+              sameSite:
+                sessionOptions.sameSite
+            }
+          );
+
+          return customRes;
+        }
+      };
+
+      /*
+       * --------------------------------------------------------------
+       * MIDDLEWARE + ROUTE EXECUTION
+       * --------------------------------------------------------------
+       */
+
+      const combinedChainStack = [
+        ...globalMiddlewares,
+        ...matchedRoute.middlewares
+      ];
+
+      let activeChainIndex = 0;
+
+      const pipelineStepRunner =
+        async () => {
+          if (
+            activeChainIndex <
+            combinedChainStack.length
+          ) {
+            const middleware =
+              combinedChainStack[
+                activeChainIndex++
+              ];
+
+            let nextCalled =
+              false;
+
+            const next = () => {
+              nextCalled = true;
+            };
+
+            await evaluator.callFunction(
+              middleware,
+              [
+                customReq,
+                customRes,
+                next
+              ],
+              evaluator.global
+            );
+
+            if (nextCalled) {
+              await pipelineStepRunner();
+            } else {
+              if (
+                !res.writableEnded
+              ) {
+                res.writeHead(
+                  400,
+                  {
+                    'Content-Type':
+                      'text/plain; charset=utf-8'
+                  }
+                );
+
+                res.end(
+                  'Request terminated by middleware.'
+                );
+              }
+            }
+
+            return;
+          }
+
+          /*
+           * ----------------------------------------------------------
+           * ROUTE HANDLER
+           * ----------------------------------------------------------
+           */
+
+          try {
+            const responseOutput =
+              await evaluator.callFunction(
+                matchedRoute.handler,
+                [
+                  customReq,
+                  customRes
+                ],
+                evaluator.global
+              );
+
+            if (
+              res.writableEnded
+            ) {
+              return;
+            }
+
+            /*
+             * --------------------------------------------------------
+             * AUTOMATIC SESSION COOKIE
+             * --------------------------------------------------------
+             *
+             * This is deliberately done after the route handler,
+             * so changes to the session made by login/auth code are
+             * preserved.
+             */
+
+            if (
+              sessionId
+            ) {
+              customRes.setCookie(
+                sessionOptions.cookieName,
+                sessionId,
+                {
+                  maxAge:
+                    sessionOptions.maxAge,
+
+                  httpOnly:
+                    sessionOptions.httpOnly,
+
+                  secure:
+                    sessionOptions.secure,
+
+                  sameSite:
+                    sessionOptions.sameSite,
+
+                  path:
+                    sessionOptions.path
+                }
+              );
+            }
+
+            /*
+             * Authenticated/session responses should normally not
+             * be cached by browsers or intermediary caches.
+             */
+
+            if (
+              sessionOptions.cacheControl &&
+              sessionId
+            ) {
+              res.setHeader(
+                'Cache-Control',
+                'no-store, no-cache, must-revalidate, private'
+              );
+
+              res.setHeader(
+                'Pragma',
+                'no-cache'
+              );
+
+              res.setHeader(
+                'Expires',
+                '0'
+              );
+            }
+
+            if (
+              outboundCookiesQueue.length >
+              0
+            ) {
+              res.setHeader(
+                'Set-Cookie',
+                outboundCookiesQueue
+              );
+            }
+
+            /*
+             * --------------------------------------------------------
+             * AUTOMATIC RESPONSE
+             * --------------------------------------------------------
+             */
+
+            if (
+              typeof responseOutput ===
+                'object' &&
+              responseOutput !== null
+            ) {
+              res.setHeader(
+                'Content-Type',
+                'application/json; charset=utf-8'
+              );
+
+              res.writeHead(
+                res.statusCode || 200
+              );
+
+              res.end(
+                JSON.stringify(
+                  responseOutput
+                )
+              );
+
+              return;
+            }
+
+            if (
+              responseOutput !==
+              undefined
+            ) {
+              res.setHeader(
+                'Content-Type',
+                'text/html; charset=utf-8'
+              );
+
+              res.writeHead(
+                res.statusCode || 200
+              );
+
+              res.end(
+                String(
+                  responseOutput
+                )
+              );
+
+              return;
+            }
+
+            /*
+             * A route is allowed to finish without returning anything.
+             */
+
+            if (
+              !res.writableEnded
+            ) {
+              res.writeHead(
+                res.statusCode || 204
+              );
+
+              res.end();
+            }
+          } catch (error) {
+            if (
+              res.writableEnded
+            ) {
+              return;
+            }
+
+            console.error(
+              error
+            );
+
+            res.writeHead(
+              500,
+              {
+                'Content-Type':
+                  'text/plain; charset=utf-8'
+              }
+            );
+
+            res.end(
+              options.exposeErrors
+                ? `Internal Server Error Diagnostics: ${error.message}`
+                : 'Internal Server Error'
+            );
+          }
+        };
+
+      await pipelineStepRunner();
+    } catch (error) {
+      if (
+        !res.writableEnded
+      ) {
+        console.error(
+          error
+        );
+
+        res.writeHead(
+          500,
+          {
+            'Content-Type':
+              'text/plain; charset=utf-8'
+          }
+        );
+
+        res.end(
+          options.exposeErrors
+            ? `Internal Server Error Diagnostics: ${error.message}`
+            : 'Internal Server Error'
+        );
+      }
+    }
+  };
+
+  /*
+   * --------------------------------------------------------------------------
+   * HTTP / HTTPS SERVER
+   * --------------------------------------------------------------------------
+   */
+
+  const nodeServer =
+    options.key &&
+    options.cert
+      ? https.createServer(
+          {
+            key:
+              fs.readFileSync(
+                options.key
+              ),
+
+            cert:
+              fs.readFileSync(
+                options.cert
+              )
+          },
+          requestHandler
+        )
+      : http.createServer(
+          requestHandler
+        );
+
+  /*
+   * --------------------------------------------------------------------------
+   * WEBSOCKETS
+   * --------------------------------------------------------------------------
+   */
+
+  let wsServerInstance =
+    null;
+
+  if (
+    options.enableWebSockets
+  ) {
+    wsServerInstance =
+      new WebSocketServer({
+        noServer: true
+      });
+
+    nodeServer.on(
+      'upgrade',
+      (
+        request,
+        socket,
+        head
+      ) => {
+        wsServerInstance.handleUpgrade(
+          request,
+          socket,
+          head,
+          (ws) => {
+            wsServerInstance.emit(
+              'connection',
+              ws,
+              request
+            );
+          }
+        );
+      }
+    );
+  }
+
+  /*
+   * --------------------------------------------------------------------------
+   * SERVER API
+   * --------------------------------------------------------------------------
+   */
+
+  return {
+    /*
+     * Middleware
+     */
+
+    use: (
+      middlewareFn
+    ) => {
+      globalMiddlewares.push(
+        middlewareFn
+      );
+
+      return null;
+    },
+
+    /*
+     * GET
+     */
+
+    get: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'GET',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    /*
+     * POST
+     */
+
+    post: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'POST',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    /*
+     * PUT
+     */
+
+    put: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'PUT',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    /*
+     * PATCH
+     */
+
+    patch: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'PATCH',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    delete: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'DELETE',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    options: (
+      routePath,
+      ...args
+    ) => {
+      const handler =
+        args.pop();
+
+      registerRoute(
+        'OPTIONS',
+        routePath,
+        handler,
+        args
+      );
+
+      return null;
+    },
+
+    onWebSocket: (
+      connectionCallback
+    ) => {
+      if (
+        !wsServerInstance
+      ) {
+        return null;
+      }
+
+      wsServerInstance.on(
+        'connection',
+        (
+          ws,
+          req
+        ) => {
+          const customWsObject = {
+            send: (
+              message
+            ) => {
+              ws.send(
+                typeof message ===
+                  'object'
+                  ? JSON.stringify(
+                      message
+                    )
+                  : String(
+                      message
+                    )
+              );
+            },
+
+            onMessage: (
+              messageCallback
+            ) => {
+              ws.on(
+                'message',
+                (
+                  data
+                ) => {
+                  evaluator.callFunction(
+                    messageCallback,
+                    [
+                      data.toString()
+                    ],
+                    evaluator.global
+                  );
+                }
+              );
+            },
+
+            onClose: (
+              closeCallback
+            ) => {
+              ws.on(
+                'close',
+                () => {
+                  evaluator.callFunction(
+                    closeCallback,
+                    [],
+                    evaluator.global
+                  );
+                }
+              );
+            }
+          };
+
+          evaluator.callFunction(
+            connectionCallback,
+            [
+              customWsObject,
+              req
+            ],
+            evaluator.global
+          );
+        }
+      );
+
+      return null;
+    },
+
+    listen: (
+      port,
+      callback
+    ) => {
+      nodeServer.listen(
+        port,
+        () => {
+          if (
+            callback
+          ) {
+            evaluator.callFunction(
+              callback,
+              [
+                port
+              ],
+              evaluator.global
+            );
+          }
+        }
+      );
+
+      return null;
+    }
+  };
 });
 this.global.define('JSONParse', arg => {
         if (typeof arg !== 'string') {
