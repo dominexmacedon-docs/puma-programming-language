@@ -6,7 +6,7 @@ const Lexer = require('./lexer');
 const Parser = require('./parser');
 const Evaluator = require('./evaluator');
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 
 const COLOR = {
     reset: '\x1b[0m',
